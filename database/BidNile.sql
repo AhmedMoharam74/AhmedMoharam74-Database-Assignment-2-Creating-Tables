@@ -194,3 +194,212 @@ CREATE TABLE Sales.AuctionFollower
 );
 GO
 
+/* -------------------- Task 3: ALTER -------------------- */
+
+/* 3.1 Connect everything. All FKs are added after table creation
+   so the circular Employee <-> Warehouse relationship is possible. */
+ALTER TABLE Geography.City
+ADD CONSTRAINT FK_City_Country
+FOREIGN KEY (CountryCode) REFERENCES Geography.Country(CountryCode);
+GO
+
+ALTER TABLE People.Member
+ADD CONSTRAINT FK_Member_City
+FOREIGN KEY (CityId) REFERENCES Geography.City(CityId);
+GO
+
+ALTER TABLE People.Member
+ADD CONSTRAINT FK_Member_InvitedBy
+FOREIGN KEY (InvitedByMemberId) REFERENCES People.Member(MemberId);
+GO
+
+ALTER TABLE People.Wallet
+ADD CONSTRAINT FK_Wallet_Member
+FOREIGN KEY (MemberId) REFERENCES People.Member(MemberId);
+GO
+
+ALTER TABLE Inventory.Warehouse
+ADD CONSTRAINT FK_Warehouse_City
+FOREIGN KEY (CityId) REFERENCES Geography.City(CityId);
+GO
+
+ALTER TABLE People.Employee
+ADD CONSTRAINT FK_Employee_Member
+FOREIGN KEY (MemberId) REFERENCES People.Member(MemberId);
+GO
+
+ALTER TABLE People.Employee
+ADD CONSTRAINT FK_Employee_Warehouse
+FOREIGN KEY (WarehouseId) REFERENCES Inventory.Warehouse(WarehouseId);
+GO
+
+ALTER TABLE Inventory.Warehouse
+ADD CONSTRAINT FK_Warehouse_Manager
+FOREIGN KEY (ManagerMemberId) REFERENCES People.Employee(MemberId);
+GO
+
+/* An employee manages at most one warehouse. A filtered unique index (not a
+   plain UNIQUE) lets many warehouses keep a NULL manager while the circular
+   Warehouse <-> Employee data is being loaded. */
+CREATE UNIQUE INDEX UX_Warehouse_ManagerMemberId
+ON Inventory.Warehouse(ManagerMemberId)
+WHERE ManagerMemberId IS NOT NULL;
+GO
+
+ALTER TABLE Inventory.Category
+ADD CONSTRAINT FK_Category_Parent
+FOREIGN KEY (ParentCategoryId) REFERENCES Inventory.Category(CategoryId);
+GO
+
+ALTER TABLE Inventory.Item
+ADD CONSTRAINT FK_Item_Seller
+FOREIGN KEY (SellerMemberId) REFERENCES People.Member(MemberId);
+GO
+
+ALTER TABLE Inventory.Item
+ADD CONSTRAINT FK_Item_Inspector
+FOREIGN KEY (InspectorMemberId) REFERENCES People.Member(MemberId);
+GO
+
+ALTER TABLE Inventory.Item
+ADD CONSTRAINT FK_Item_Category
+FOREIGN KEY (CategoryId) REFERENCES Inventory.Category(CategoryId);
+GO
+
+ALTER TABLE Inventory.Item
+ADD CONSTRAINT FK_Item_Warehouse
+FOREIGN KEY (WarehouseId) REFERENCES Inventory.Warehouse(WarehouseId);
+GO
+
+ALTER TABLE Inventory.ItemPhoto
+ADD CONSTRAINT FK_ItemPhoto_Item
+FOREIGN KEY (ItemId) REFERENCES Inventory.Item(ItemId) ON DELETE CASCADE;
+GO
+
+ALTER TABLE Sales.Auction
+ADD CONSTRAINT FK_Auction_Item
+FOREIGN KEY (ItemId) REFERENCES Inventory.Item(ItemId);
+GO
+
+ALTER TABLE Sales.Bid
+ADD CONSTRAINT FK_Bid_Auction
+FOREIGN KEY (AuctionId) REFERENCES Sales.Auction(AuctionId);
+GO
+
+ALTER TABLE Sales.Bid
+ADD CONSTRAINT FK_Bid_Member
+FOREIGN KEY (MemberId) REFERENCES People.Member(MemberId);
+GO
+
+ALTER TABLE Sales.AuctionFollower
+ADD CONSTRAINT FK_AuctionFollower_Member
+FOREIGN KEY (MemberId) REFERENCES People.Member(MemberId);
+GO
+
+ALTER TABLE Sales.AuctionFollower
+ADD CONSTRAINT FK_AuctionFollower_Auction
+FOREIGN KEY (AuctionId) REFERENCES Sales.Auction(AuctionId);
+GO
+
+/* 3.2 App language: existing rows receive 'ar' */
+ALTER TABLE People.Member
+ADD AppLanguage CHAR(2) NOT NULL
+    CONSTRAINT DF_Member_AppLanguage DEFAULT ('ar') WITH VALUES
+    CONSTRAINT CK_Member_AppLanguage CHECK (AppLanguage IN ('ar', 'en'));
+GO
+
+/* 3.3 Featured flag */
+ALTER TABLE Inventory.Item
+ADD IsFeatured BIT NOT NULL
+    CONSTRAINT DF_Item_IsFeatured DEFAULT (0) WITH VALUES;
+GO
+
+/* 3.4 Rename columns using sp_rename */
+EXEC sp_rename N'Sales.Bid.IPAddress', N'DeviceIp', N'COLUMN';
+GO
+EXEC sp_rename N'Inventory.Warehouse.Capacity', N'MaxItems', N'COLUMN';
+GO
+
+/* 3.5 Increase FullName to 150 and keep NOT NULL */
+ALTER TABLE People.Member
+ALTER COLUMN FullName NVARCHAR(150) NOT NULL;
+GO
+
+/* 3.6 Change MaxItems to the smallest type that can hold 30,000.
+   SMALLINT range is -32,768..32,767 (TINYINT only reaches 255).
+   Expected error: the old CHECK depends on the column, so ALTER COLUMN fails
+   until that constraint is dropped. Fix: drop it, change the type, re-create it
+   with "> 0" kept and the new 30,000 business limit added.
+   Rows above 30,000 (if any) are capped first so the new CHECK can be created. */
+UPDATE Inventory.Warehouse
+SET MaxItems = 30000
+WHERE MaxItems > 30000;
+GO
+ALTER TABLE Inventory.Warehouse
+DROP CONSTRAINT CK_Warehouse_Capacity;
+GO
+ALTER TABLE Inventory.Warehouse
+ALTER COLUMN MaxItems SMALLINT NOT NULL;
+GO
+ALTER TABLE Inventory.Warehouse
+ADD CONSTRAINT CK_Warehouse_MaxItems CHECK (MaxItems > 0 AND MaxItems <= 30000);
+GO
+
+/* 3.7 Replace commission CHECK: maximum is now 25% */
+ALTER TABLE Inventory.Category
+DROP CONSTRAINT CK_Category_Commission;
+GO
+ALTER TABLE Inventory.Category
+ADD CONSTRAINT CK_Category_Commission CHECK (Commission BETWEEN 0 AND 25);
+GO
+
+/* 3.8 Allow PendingReview and make it the default */
+ALTER TABLE Sales.Auction
+DROP CONSTRAINT CK_Auction_Status;
+GO
+ALTER TABLE Sales.Auction
+ADD CONSTRAINT CK_Auction_Status
+CHECK (Status IN ('Draft','PendingReview','Live','Ended','Cancelled'));
+GO
+ALTER TABLE Sales.Auction
+DROP CONSTRAINT DF_Auction_Status;
+GO
+ALTER TABLE Sales.Auction
+ADD CONSTRAINT DF_Auction_Status DEFAULT ('PendingReview') FOR Status;
+GO
+
+/* 3.9 Optional BuyNowPrice, must be greater than StartingPrice.
+   WITH CHECK validates existing rows; safe because the new column is NULL
+   for existing rows and NULL passes this CHECK expression. */
+ALTER TABLE Sales.Auction
+ADD BuyNowPrice DECIMAL(12,2) NULL;
+GO
+ALTER TABLE Sales.Auction WITH CHECK
+ADD CONSTRAINT CK_Auction_BuyNowPrice
+CHECK (BuyNowPrice IS NULL OR BuyNowPrice > StartingPrice);
+GO
+
+/* 3.10 Mobile must be unique */
+ALTER TABLE People.Member
+ADD CONSTRAINT UQ_Member_Mobile UNIQUE (Mobile);
+GO
+
+/* 3.11 Add VerifiedAt, then remove old IsVerified.
+   Drop the DEFAULT constraint first because it is attached to IsVerified. */
+ALTER TABLE People.Member
+ADD VerifiedAt DATETIME2(3) NULL;
+GO
+ALTER TABLE People.Member
+DROP CONSTRAINT DF_Member_IsVerified;
+GO
+ALTER TABLE People.Member
+DROP COLUMN IsVerified;
+GO
+
+/* 3.12 Create Marketing and transfer follower table */
+CREATE SCHEMA Marketing;
+GO
+ALTER SCHEMA Marketing TRANSFER Sales.AuctionFollower;
+GO
+
+/* End of assignment DDL */
